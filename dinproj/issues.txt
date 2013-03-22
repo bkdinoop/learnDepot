@@ -1,0 +1,3 @@
+####Issues faced####
+ In Installed app we need to give the name of new application like how we import a python module.
+ While creating sql queries, we should use max_length instead of maxlength variable (got changed in django 1.5)
