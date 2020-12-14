@@ -1,0 +1,230 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Template creates Prowler infra
+  
+Parameters:
+  ProwlerImageName:
+    Type: String
+
+  SecAuditRole:
+    Type: String
+
+  PermissionBoundaryRole:
+    Description: Role ARN for permission boundary
+    Type: String 
+
+  MasterOrgRole:
+    Description: Role ARN to assume master account to invoke Org API
+    Type: String 
+
+  MasterAccId:
+    Description: Master Account ID 
+    Type: String
+
+  PrivateSubnetAz1:
+    Description: Subnet Id of private AZ1
+    Type: String
+
+  PrivateSubnetAz2:
+    Description: Subnet Id of private AZ2 
+    Type: String
+
+  OUId:
+    Description: OU Id of the organization 
+    Type: String 
+
+  
+Resources:
+  prowlerSecHubTaskDef:
+    Type: "AWS::ECS::TaskDefinition"
+    Properties:
+      Family: prowler-sechub
+      ContainerDefinitions:
+        - Image: !Ref ProwlerImageName
+          Cpu: 1024
+          Memory: 2048
+          Name: prowler-sechub-task
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref taskCWLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: ecs-prowler-task-logs
+      Cpu: 1024
+      Memory: 2048
+      ExecutionRoleArn: !GetAtt taskExecutionRole.Arn      
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      TaskRoleArn: !GetAtt prowlertaskRole.Arn
+
+  prowlerSecGrp:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: The security group will be used for prowler fargate
+      GroupName: core-prowler-sechub-sg
+      VpcId: !ImportValue CoreVPC:VpcId
+      SecurityGroupEgress:
+        -
+          CidrIp: 0.0.0.0/0
+          Description: HTTPS Rule
+          FromPort: 443
+          IpProtocol: tcp
+          ToPort: 443
+        - 
+          CidrIp: 0.0.0.0/0
+          Description: HTTP rule
+          FromPort: 80
+          IpProtocol: tcp
+          ToPort: 80
+  
+  prowlerSecHubCluster:
+    Type: "AWS::ECS::Cluster"
+    Properties:      
+      ClusterName: core-prowler-sechub
+      CapacityProviders:
+        - FARGATE
+
+  prowlerTaskController:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      Code: ./src/
+      Description: Function that initiate the prowler ecs tasks
+      Environment:
+        Variables:
+          SECURITY_AUDIT_ROLE: !Ref SecAuditRole
+          FARGATE_CLUSTER: !Ref prowlerSecHubCluster
+          FARGATE_TASK_DEF_NAME: !Ref prowlerSecHubTaskDef
+          SUBNET_ID_AZ1: !Ref PrivateSubnetAz1
+          SUBNET_ID_AZ2: !Ref PrivateSubnetAz2
+          SECURITY_GROUP: !GetAtt prowlerSecGrp.GroupId
+          MASTER_ACC_ID: !Ref MasterAccId
+          MASTER_ROLE_NAME: !Ref MasterOrgRole
+          OU_ID: !Ref OUId
+      FunctionName: core-prowler-initiator
+      Handler: prowler_initiator.handler
+      MemorySize: 256      
+      Role: !GetAtt prowlerFnrole.Arn
+      Runtime: python3.7
+      Timeout: 240
+
+  # CW LogGroup for Lambda function
+  prowlerFnLogGroup: 
+    Type: "AWS::Logs::LogGroup"
+    Properties:
+      LogGroupName: /aws/lambda/prowler-sechub-loggrp
+      RetentionInDays: 90
+
+  # CW LogGroup for ECS Task
+  taskCWLogGroup:
+    Type: "AWS::Logs::LogGroup"
+    Properties:
+      LogGroupName: /aws/ecs/tasks/prowlerSecHubTaskLogGrp      
+      RetentionInDays: 90
+
+  taskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - "ecs-tasks.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      RoleName: "ExecutionRole-prowler"
+      PermissionsBoundary: !Ref PermissionBoundaryRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+      Policies:
+        - PolicyName: ExecutionRole-prowler-inline001
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:            
+            - Effect: Allow
+              Action:
+                - logs:CreateLogGroup
+                - logs:CreateLogStream
+                - logs:PutLogEvents
+              Resource: '*'
+
+  prowlertaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - "ecs-tasks.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      RoleName: "taskrole-prowler-sechub"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/SecurityAudit
+      PermissionsBoundary: !Ref PermissionBoundaryRole
+      Policies:
+        - PolicyName: taskrole-prowler-inline001
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:            
+            - Effect: Allow
+              Action:
+                - sts:AssumeRole
+              Resource: 
+                - arn:aws:iam::*:role/SecurityAuditRole
+                - !Ref MasterOrgRole
+            - Effect: Allow
+              Action:
+                - securityhub:GetFindings
+                - securityhub:EnableImportFindingsForProduct
+                - securityhub:BatchImportFindings
+              Resource: "*"
+
+  prowlerFnrole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action:
+              - sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+        Version: "2012-10-17"
+      PermissionsBoundary: !Ref PermissionBoundaryRole
+      RoleName: prowler-initiator-lambdrole
+      Policies:
+        - PolicyDocument:
+            Statement:
+              - Action:                  
+                  - logs:CreateLogStream
+                  - logs:CreateLogGroup                  
+                  - logs:PutLogEvents                  
+                Effect: Allow
+                Resource: '*'
+              - Action:
+                  - ecs:RunTask
+                  - iam:PassRole
+                Effect: Allow
+                Resource: "*"
+              - Action: 
+                  - sts:AssumeRole
+                Effect: Allow
+                Resource: !Ref MasterOrgRole                              
+            Version: "2012-10-17"
+          PolicyName: "prowler-fn-role-policy"
+
+  # Event rule for prowler Group4 check
+  #grp4eventrule:
+  #  Type: AWS::Events::Rule
+  #  Properties:
+  #    ScheduleExpression: "cron(0 4 * * ? *)"
+  #    State: "ENABLED"
+  #    Targets:
+  #      - Arn: !GetAtt prowlerTaskController.Arn
+  #        Id: "prowler-Grp4-check-rule"
+  #        Input: "{\"group\": \"group4\"}"
