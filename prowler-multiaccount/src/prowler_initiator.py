@@ -59,7 +59,7 @@ def getAcc():
         raise e
 
 
-def run_prolwer_task():    
+def run_prolwer_task(acc, grpName):
     ecsClient = boto3.client("ecs")
     resp = ecsClient.run_task(
         cluster=FARGATE_CLUSTER,
@@ -69,8 +69,9 @@ def run_prolwer_task():
         overrides={
             'containerOverrides': [
                 {
-                    "command": ["-A", "111111111", "-R", SEC_AUDIT_ROLE, "-S", "-M", "json-asff", "-b", "-q","-g", "group4", "-f", AWS_REGION],
-                    "name": "prowler-sechub-task",                    
+                    "command": ["-A", acc, "-R", SEC_AUDIT_ROLE, "-S", "-M", "json-asff",
+                                "-b", "-q", "-g", grpName, "-f", AWS_REGION],
+                    "name": "prowler-sechub-task",
                 }
             ]
         },
